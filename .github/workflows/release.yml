@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-lendctl:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            cc: gcc
+          - arch: arm64
+            cc: aarch64-linux-gnu-gcc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross compiler
+        if: matrix.arch == 'arm64'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build lendctl
+        run: |
+          ${{ matrix.cc }} -static -O2 -o lendctl_linux_${{ matrix.arch }} lend/cmd/lendctl/lendctl.c
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lendctl_linux_${{ matrix.arch }}
+          path: lendctl_linux_${{ matrix.arch }}
+
+  build-lendd:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build lendd
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          cd lend
+          go build -ldflags="-s -w" -o ../lendd_${{ matrix.goos }}_${{ matrix.goarch }} ./cmd/lendd
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lendd_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: lendd_${{ matrix.goos }}_${{ matrix.goarch }}
+
+  release:
+    needs: [build-lendctl, build-lendd]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
