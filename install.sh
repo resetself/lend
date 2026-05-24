@@ -22,18 +22,18 @@ fi
 detect_platform() {
     OS=$(uname -s | tr '[:upper:]' '[:lower:]')
     ARCH=$(uname -m)
-    
+
     case "$ARCH" in
         x86_64) ARCH="amd64" ;;
         aarch64|arm64) ARCH="arm64" ;;
         *) error "Unsupported architecture: $ARCH" ;;
     esac
-    
+
     case "$OS" in
         darwin|linux) ;;
         *) error "Unsupported OS: $OS" ;;
     esac
-    
+
     PLATFORM="${OS}_${ARCH}"
     info "Detected platform: $PLATFORM"
 }
@@ -43,21 +43,21 @@ download_binary() {
         info "Using local build"
         return
     fi
-    
+
     info "Fetching latest version..."
     LATEST=$(curl -fsSL "https://api.github.com/repos/$REPO/releases" | grep '"tag_name"' | head -1 | cut -d'"' -f4)
-    
+
     if [ -z "$LATEST" ]; then
         error "Failed to get latest version, check your network"
     fi
-    
+
     info "Downloading lend $LATEST..."
     DOWNLOAD_URL="https://github.com/$REPO/releases/download/$LATEST/lendd_${PLATFORM}"
-    
+
     mkdir -p "$BIN_DIR"
     curl -fsSL "$DOWNLOAD_URL" -o "$BIN_DIR/lendd"
     chmod +x "$BIN_DIR/lendd"
-    
+
     info "Installed to $BIN_DIR/lendd"
 }
 
@@ -77,14 +77,15 @@ setup_dirs() {
 
 setup_ssh_config() {
     info "Configuring SSH..."
-    
+
     cat > "$INSTALL_DIR/ssh/config" << 'SSHEOF'
-Match Exec "! ps -p $(ps -p $$ -o ppid=)| grep -q 'sftp'" 
+Match !originalhost orb Exec "! ps -p $(ps -p $(sh -c 'echo $PPID') -o ppid=) | grep -q 'sftp'"
 	LocalCommand ~/.lend/scripts/local_handler.sh %n &
 	PermitLocalCommand yes
 	RemoteForward 4466 localhost:52698
-	RemoteCommand bash -c '{ mkdir -p $HOME/.lend/{bin,files/%n}; rm -f $HOME/.lend/files/%n/* 2>/dev/null; test -f $HOME/.lend/bin/lendctl || { if command -v gcc >/dev/null; then echo "install_lendctl" | curl -s --max-time 2 telnet://localhost:4466 | gcc -x c -o $HOME/.lend/bin/lendctl -; fi; test -f $HOME/.lend/bin/lendctl || { ARCH=$(uname -m | sed "s/x86_64/amd64/;s/aarch64/arm64/"); curl -fsSL "https://github.com/resetself/lend/releases/latest/download/lendctl_linux_${ARCH}" -o $HOME/.lend/bin/lendctl && chmod +x $HOME/.lend/bin/lendctl; }; }; grep -q ".lend/bin" "$HOME/.profile" || echo "export PATH=$PATH:$HOME/.lend/bin" >> $HOME/.profile; } 2>/dev/null; source $HOME/.profile 2>/dev/null; exec zsh -l 2>/dev/null || exec bash -l;'
+	RemoteCommand bash -c '{ mkdir -p $HOME/.lend/{bin,files/%n}; rm -f $HOME/.lend/files/%n/* 2>/dev/null; test -f $HOME/.lend/bin/lendctl || { if command -v gcc >/dev/null; then echo "install_lendctl" | curl -s --max-time 2 telnet://localhost:4466 | gcc -x c -o $HOME/.lend/bin/lendctl -; fi; test -f $HOME/.lend/bin/lendctl || { ARCH=$(uname -m | sed "s/x86_64/amd64/;s/aarch64/arm64/"); curl -fsSL "https://github.com/resetself/lend/releases/latest/download/lendctl_linux_${ARCH}" -o $HOME/.lend/bin/lendctl && chmod +x $HOME/.lend/bin/lendctl; }; }; grep -q ".lend/bin" "$HOME/.profile" || echo "export PATH=$PATH:$HOME/.lend/bin" >> $HOME/.profile; } 2>/dev/null; source $HOME/.profile 2>/dev/null; exec "$SHELL" -l;'
 	RequestTTY yes
+	SetEnv TERM=xterm-256color
 SSHEOF
 
     cat > "$INSTALL_DIR/scripts/local_handler.sh" << 'HANDLER'
@@ -118,10 +119,10 @@ for i in 1 2 3; do
 done
 HANDLER
     chmod +x "$INSTALL_DIR/scripts/local_handler.sh"
-    
+
     SSH_CONFIG="$HOME/.ssh/config"
     INCLUDE_LINE="Include ~/.lend/ssh/config"
-    
+
     if [ ! -f "$SSH_CONFIG" ]; then
         mkdir -p "$HOME/.ssh"
         printf "\n%s\n" "$INCLUDE_LINE" > "$SSH_CONFIG"
@@ -132,18 +133,55 @@ HANDLER
 }
 
 setup_path() {
-    SHELL_RC=""
-    if [ -n "$ZSH_VERSION" ] || [ "$SHELL" = "/bin/zsh" ]; then
-        SHELL_RC="$HOME/.zshrc"
+    CURRENT_SHELL=$(basename "$SHELL")
+
+    # 根据 Shell 类型设置配置文件路径和 PATH 添加语法
+    case "$CURRENT_SHELL" in
+        bash)
+            RC_FILE="$HOME/.bashrc"
+            EXPORT_LINE='export PATH="$PATH:$HOME/.lend/bin"'
+            CHECK_PATTERN='\.lend/bin'
+            ;;
+        zsh)
+            RC_FILE="$HOME/.zshrc"
+            EXPORT_LINE='export PATH="$PATH:$HOME/.lend/bin"'
+            CHECK_PATTERN='\.lend/bin'
+            ;;
+        fish)
+            RC_FILE="$HOME/.config/fish/config.fish"
+            EXPORT_LINE='set -gx PATH $PATH $HOME/.lend/bin'
+            CHECK_PATTERN='\.lend/bin'
+            ;;
+        ksh)
+            RC_FILE="$HOME/.kshrc"
+            EXPORT_LINE='export PATH="$PATH:$HOME/.lend/bin"'
+            CHECK_PATTERN='\.lend/bin'
+            ;;
+        tcsh|csh)
+            RC_FILE="$HOME/.tcshrc"   # 或 .cshrc
+            EXPORT_LINE='setenv PATH ${PATH}:$HOME/.lend/bin'
+            CHECK_PATTERN='\.lend/bin'
+            ;;
+        sh)   # 通常为 POSIX sh，使用 .profile
+            RC_FILE="$HOME/.profile"
+            EXPORT_LINE='export PATH="$PATH:$HOME/.lend/bin"'
+            CHECK_PATTERN='\.lend/bin'
+            ;;
+        *)
+            echo "Unknown shell: $CURRENT_SHELL, skipping PATH addition" >&2
+            exit 1
+            ;;
+    esac
+
+    # 确保配置文件所在的目录存在（例如 ~/.config/fish/）
+    mkdir -p "$(dirname "$RC_FILE")" 2>/dev/null
+
+    # 检查并添加（如果尚未存在）
+    if ! grep -q "$CHECK_PATTERN" "$RC_FILE" 2>/dev/null; then
+        echo "$EXPORT_LINE" >> "$RC_FILE"
+        echo "Added PATH to $RC_FILE"
     else
-        SHELL_RC="$HOME/.bashrc"
-    fi
-    
-    EXPORT_LINE='export PATH="$PATH:$HOME/.lend/bin"'
-    
-    if ! grep -q '.lend/bin' "$SHELL_RC" 2>/dev/null; then
-        echo "$EXPORT_LINE" >> "$SHELL_RC"
-        info "Added PATH to $SHELL_RC"
+        echo "PATH already configured in $RC_FILE"
     fi
 }
 
@@ -164,7 +202,7 @@ main() {
     echo ""
     echo "  Lend - Lend your local tools to remote servers"
     echo ""
-    
+
     cleanup
     detect_platform
     setup_dirs
@@ -172,7 +210,7 @@ main() {
     setup_ssh_config
     setup_path
     check_deps
-    
+
     info "Installation complete!"
     echo ""
     echo "Usage:"
