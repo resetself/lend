@@ -67,7 +67,9 @@ cleanup() {
 
     # Unmount all lend sshfs mounts
     mount | grep "\.lend/files" | awk '{print $3}' | while read mnt; do
-        fusermount -uz "$mnt" 2>/dev/null || umount -f "$mnt" 2>/dev/null || true
+        if mountpoint -q "$mnt"; then
+            fusermount -uz "$mnt" 2>/dev/null || umount -f "$mnt" 2>/dev/null || true
+        fi
     done
 
     pkill -f "sshfs.*\.lend" 2>/dev/null || true
