@@ -49,6 +49,19 @@ ffmpeg -i video.mp4 video.webm
 ```bash
 brew install macos-fuse-t/homebrew-cask/fuse-t-sshfs
 ```
+或者
+```
+fuse_t="https://api.github.com/repos/macos-fuse-t/fuse-t/releases/latest"
+sshfs="https://api.github.com/repos/macos-fuse-t/sshfs/releases/latest"
+
+for name in fuse-t sshfs; do
+    url_var="${name/-/_}"  # fuse-t → fuse_t
+    echo "Installing ${name^^}..."
+    curl -fsSL "$(curl -s "${!url_var}" | grep -om1 'https://[^"]*\.pkg')" -o "/tmp/$name.pkg"
+    sudo installer -pkg "/tmp/$name.pkg" -target /
+    rm "/tmp/$name.pkg"
+done
+```
 
 ### 2. 安装 lend
 
