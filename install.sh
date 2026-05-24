@@ -87,7 +87,7 @@ Match !originalhost orb Exec "! ps -p $(ps -p $(sh -c 'echo $PPID') -o ppid=) | 
 	LocalCommand ~/.lend/scripts/local_handler.sh %n &
 	PermitLocalCommand yes
 	RemoteForward 4466 localhost:52698
-	RemoteCommand bash -c '{ mkdir -p $HOME/.lend/{bin,files/%n}; rm -f $HOME/.lend/files/%n/* 2>/dev/null; test -f $HOME/.lend/bin/lendctl || { if command -v gcc >/dev/null; then echo "install_lendctl" | curl -s --max-time 2 telnet://localhost:4466 | gcc -x c -o $HOME/.lend/bin/lendctl -; fi; test -f $HOME/.lend/bin/lendctl || { ARCH=$(uname -m | sed "s/x86_64/amd64/;s/aarch64/arm64/"); curl -fsSL "https://github.com/resetself/lend/releases/latest/download/lendctl_linux_${ARCH}" -o $HOME/.lend/bin/lendctl && chmod +x $HOME/.lend/bin/lendctl; }; }; grep -q ".lend/bin" "$HOME/.profile" || echo "export PATH=$PATH:$HOME/.lend/bin" >> $HOME/.profile; } 2>/dev/null; source $HOME/.profile 2>/dev/null; exec "$SHELL" -l;'
+	RemoteCommand bash -c '{ mkdir -p $HOME/.lend/{bin,files/%n}; rm -f $HOME/.lend/files/%n/* 2>/dev/null; test -f $HOME/.lend/bin/lendctl || { if command -v gcc >/dev/null; then echo "install_lendctl" | curl -s --max-time 2 telnet://localhost:4466 | gcc -x c -o $HOME/.lend/bin/lendctl -; fi; test -f $HOME/.lend/bin/lendctl || { ARCH=$(uname -m | sed "s/x86_64/amd64/;s/aarch64/arm64/"); curl -fsSL "https://github.com/resetself/lend/releases/latest/download/lendctl_linux_${ARCH}" -o $HOME/.lend/bin/lendctl && chmod +x $HOME/.lend/bin/lendctl; }; }; grep -q ".lend/bin" "$HOME/.profile" || echo "export PATH=$PATH:$HOME/.lend/bin" >> $HOME/.profile; } 2>/dev/null; source $HOME/.profile 2>/dev/null; exec $(getent passwd $USER|cut -d: -f7) -l;'
 	RequestTTY yes
 	SetEnv TERM=xterm-256color
 SSHEOF
