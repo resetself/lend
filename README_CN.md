@@ -2,7 +2,7 @@
 
 > 把本地工具"借"给远程服务器用
 
-SSH 连接远程主机后，无需在远程安装任何软件，直接调用本地工具处理远程文件。
+SSH 连接远程主机后，无需在远程安装任何软件，直接调用本地工具处理远程文件。不需要 FUSE、SSHFS，也不需要内核扩展。
 
 ```bash
 # 在远程服务器上执行，实际由本地 sublime 打开
@@ -24,46 +24,35 @@ ffmpeg -i video.mp4 video.webm
 - 没有 root 权限，装不了软件
 - 临时机器，装了也白装
 
-**Lend 的方案**：远程服务器"借用"你本地的工具，文件通过 SSHFS 挂载，命令转发到本地执行。
+**Lend 的方案**：远程服务器"借用"你本地的工具。远程文件先复制到本地，本地工具处理完后再把改动推回远程——与 `vim scp://`（netrw）和 Emacs TRAMP 相同的"拉取-编辑-回传"模型，但面向任意黑盒命令行工具。
 
 ## 工作原理
 
 ```
 远程服务器                         本地机器
     │                                │
-    │  1. subl file.txt              │
-    │  ─────────────────────────────>│
+    │  1. subl config.yaml           │
+    │  ─────────────────────────────>│  lendd 通过 SSH 反向隧道
+    │                                │  收到文件内容
     │                                │  2. 本地 sublime 打开
-    │                                │     ~/.lend/files/file.txt
-    │                                │     (SSHFS 挂载的远程文件)
+    │                                │     缓存副本 config.yaml
     │                                │
-    │  3. 保存后直接写入远程          │
+    │  3. 保存后内容经隧道回传       │
     │  <─────────────────────────────│
+    │                                │
 ```
+
+1. 连接时，一个持久的 `ssh -N -R` 反向隧道把远程的 unix socket `~/.lend/bridge.sock` 转发到本地 `lendd` 守护进程。
+2. 在远程运行工具时，`lendctl` 会对每个参数分类（选项、文件、目录、输出文件），把文件内容/目录树发给 `lendd`，`lendd` 将其展开到 `~/.lend/files/` 下并执行本地工具。
+3. 工具退出后，`lendctl` 把修改过的文件和目录写回远程路径。
+
+不再依赖 SSHFS 挂载和 FUSE。目录以紧凑的归档流传输（文件、子目录、符号链接；跳过 socket/fifo/设备）。
 
 ## 安装
 
-**前提**：macOS 或 Linux，能 SSH 连接到远程服务器
+**前提**：macOS 或 Linux，能 SSH 连接到远程服务器。无需安装 `sshfs`、`macFUSE`、`fuse-t`。
 
-### 1. 安装 sshfs（macOS）
-```bash
-brew install macos-fuse-t/homebrew-cask/fuse-t-sshfs
-```
-或者
-```
-fuse_t="https://api.github.com/repos/macos-fuse-t/fuse-t/releases/latest"
-sshfs="https://api.github.com/repos/macos-fuse-t/sshfs/releases/latest"
-
-for name in fuse-t sshfs; do
-    url_var="${name/-/_}"  # fuse-t → fuse_t
-    echo "Installing ${name^^}..."
-    curl -fsSL "$(curl -s "${!url_var}" | grep -om1 'https://[^"]*\.pkg')" -o "/tmp/$name.pkg"
-    sudo installer -pkg "/tmp/$name.pkg" -target /
-    rm "/tmp/$name.pkg"
-done
-```
-
-### 2. 安装 lend
+### 1. 安装 lend（本地机器）
 
 * 一键安装
 ```bash
@@ -71,16 +60,23 @@ curl -fsSL https://raw.githubusercontent.com/resetself/lend/main/install.sh | ba
 ```
 
 * 从源码安装
-
 ```bash
 git clone https://github.com/resetself/lend.git
 cd lend && make && make install
 ```
 
+### 2. 发布一个 release（供远程安装 `lendctl`）
+
+远程端首次登录时会从 GitHub releases 自动下载预编译的 `lendctl` 二进制，因此使用前请先发布一个版本：
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
 ## 使用
 
 ```bash
-# 连接远程服务器（会自动挂载文件系统）
+# 连接远程服务器（自动建立反向隧道并安装 lendctl）
 ssh remote-server
 
 # 创建工具链接（只需一次）
@@ -105,11 +101,40 @@ prettier --write *.js
 | 压缩 | `7z`, `tar`, `zip` |
 | 开发工具 | `eslint`, `rubocop`, `shellcheck` |
 
+### GUI 编辑器
+
+像 `subl file.txt`、`code file.txt` 这类"启动后立即返回"的 GUI 编辑器，会在你编辑完成前就退出，导致 `lendd` 回传的还是未修改的内容。请使用它们的等待选项，让进程保持到窗口关闭：
+
+```bash
+subl -w file.txt
+code -w file.txt
+```
+
+## 参数分类规则
+
+`lendctl` 发送前会把每个参数映射为一种类型：
+
+| 参数 | 类型 |
+|------|------|
+| 以 `-` 开头 | 字符串（选项） |
+| 已存在的文件 | 文件（发送内容，执行后回写） |
+| 已存在的目录 | 目录（发送树，执行后回写） |
+| 不存在的、含 `/` 或 `.` 的路径 | 输出文件（工具写出后回传创建） |
+| 其他不存在的参数 | 字符串 |
+
 ## 安全性
 
 - 所有通信走 SSH 加密通道
-- 远程只能触发命令，无法访问本地其他文件
+- 反向隧道是 unix socket，仅限远程用户自己的 `~/.lend`（权限 `0700`）
+- 本地守护进程只监听 unix socket `~/.lend/lendd.sock`（非 TCP 端口）
+- 远程只能触发你暴露的工具，且只能拿到你传入的文件路径
 - 建议使用 SSH 密钥认证
+
+## 已知限制
+
+- 无横杠的复合参数（如 `tar czf ...`、`7z a ...`）可能被误判为输出文件，必要时加引号或调整顺序。
+- 远程 OpenSSH 服务端需支持 unix socket 转发（`StreamLocalForwarding`，OpenSSH 6.7+ 可用）。
+- 目录回写采用"覆盖或新建"策略，不会删除远程多余文件（不做 diff）。
 
 ## License
 

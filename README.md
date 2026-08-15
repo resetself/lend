@@ -2,7 +2,7 @@
 
 > Lend your local tools to remote servers
 
-Use local tools on remote servers via SSH without installing anything remotely.
+Use local tools on remote servers via SSH without installing anything remotely. No FUSE, no SSHFS, no kernel extensions.
 
 ```bash
 # Run on remote server, opens with local Sublime
@@ -24,65 +24,59 @@ ffmpeg -i video.mp4 video.webm
 - No root access to install software
 - Temporary machines, not worth setting up
 
-**Lend's solution**: Remote server "borrows" your local tools. Files are mounted via SSHFS, commands are forwarded to local execution.
+**Lend's solution**: The remote server "borrows" your local tools. Remote files are copied to your machine, the local tool runs on them, and changes are pushed back — the same fetch-edit-push model used by `vim scp://` (netrw) and Emacs TRAMP, but for arbitrary black-box CLI tools.
 
 ## How it works
 
 ```
 Remote Server                      Local Machine
     │                                │
-    │  1. subl file.txt              │
-    │  ─────────────────────────────>│
-    │                                │  2. Local Sublime opens
-    │                                │     ~/.lend/files/file.txt
-    │                                │     (SSHFS mounted remote file)
+    │  1. subl config.yaml           │
+    │  ─────────────────────────────>│  lendd receives the file content
+    │                                │  over the SSH reverse tunnel
+    │                                │  2. Local Sublime opens a
+    │                                │     cached copy of config.yaml
     │                                │
-    │  3. Save writes to remote      │
-    │  <─────────────────────────────│
+    │  3. Save → content is pushed   │
+    │  <─────────────────────────────│     back over the tunnel
+    │                                │
 ```
+
+1. On connection, a persistent `ssh -N -R` reverse tunnel forwards the remote unix socket `~/.lend/bridge.sock` to the local `lendd` daemon.
+2. When you run a tool on the remote, `lendctl` classifies each argument (flag, file, directory, or output file), sends file contents / directory trees to `lendd`, which materializes them under `~/.lend/files/` and runs the local tool.
+3. After the tool exits, `lendctl` writes modified files and directories back to the remote paths.
+
+There is no SSHFS mount and no FUSE dependency. Directories are transferred as a compact archive stream (files, subdirectories, and symlinks; sockets/fifos/devices are skipped).
 
 ## Installation
 
-**Prerequisites**: macOS or Linux, SSH access to remote servers
+**Prerequisites**: macOS or Linux with SSH access to remote servers. No `sshfs`, `macFUSE`, or `fuse-t` required.
 
-### 1. Install sshfs (macOS)
+### 1. Install lend (local machine)
 
-```bash
-brew install macos-fuse-t/homebrew-cask/fuse-t-sshfs
-```
-or 
-```
-fuse_t="https://api.github.com/repos/macos-fuse-t/fuse-t/releases/latest"
-sshfs="https://api.github.com/repos/macos-fuse-t/sshfs/releases/latest"
-
-for name in fuse-t sshfs; do
-    url_var="${name/-/_}"  # fuse-t → fuse_t
-    echo "Installing ${name^^}..."
-    curl -fsSL "$(curl -s "${!url_var}" | grep -om1 'https://[^"]*\.pkg')" -o "/tmp/$name.pkg"
-    sudo installer -pkg "/tmp/$name.pkg" -target /
-    rm "/tmp/$name.pkg"
-done
-```
-
-
-### 2. Install lendctl
-
-* Onlin install lendctl
+* One-line install:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/resetself/lend/main/install.sh | bash
 ```
 
-* build from source:
-
+* Build from source:
 ```bash
 git clone https://github.com/resetself/lend.git
 cd lend && make && make install
 ```
 
+### 2. Create a release (for remote `lendctl`)
+
+The remote side auto-downloads a precompiled `lendctl` binary from GitHub releases on first login, so publish one before using Lend with remote servers:
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
 ## Usage
 
 ```bash
-# SSH to remote server (auto-mounts filesystem)
+# SSH to remote server (sets up the reverse tunnel and installs lendctl)
 ssh remote-server
 
 # Create tool links (one-time setup)
@@ -107,11 +101,40 @@ Any local CLI tool works. Common examples:
 | Compression | `7z`, `tar`, `zip` |
 | Dev Tools | `eslint`, `rubocop`, `shellcheck` |
 
+### GUI editors
+
+GUI editors that fork and return immediately (such as `subl file.txt` or `code file.txt`) exit before you finish editing, so `lendd` would push back unchanged content. Use their wait flags so the process stays alive until the window closes:
+
+```bash
+subl -w file.txt
+code -w file.txt
+```
+
+## How arguments are classified
+
+`lendctl` maps each argument to a type before sending it over the tunnel:
+
+| Argument | Type |
+|----------|------|
+| Starts with `-` | String (flag) |
+| Existing file | File (content sent, written back after) |
+| Existing directory | Directory (tree sent, written back after) |
+| Non-existent path containing `/` or `.` | Output file (created remotely if the tool writes it) |
+| Other non-existent argument | String |
+
 ## Security
 
-- All communication over SSH encrypted channel
-- Remote can only trigger commands, no access to other local files
-- SSH key authentication recommended
+- All communication travels over the SSH encrypted channel
+- The reverse tunnel is a Unix socket restricted to the remote user's `~/.lend` (mode `0700`)
+- The local daemon listens only on a Unix socket `~/.lend/lendd.sock` (not a TCP port)
+- The remote can only trigger the tools you expose, and only receives the file paths you pass
+- SSH key authentication is recommended
+
+## Limitations
+
+- Dash-less compound flags (`tar czf ...`, `7z a ...`) may be misclassified as output files; quote or reorder them when in doubt.
+- The remote OpenSSH server must support Unix-domain-socket forwarding (`StreamLocalForwarding`), available in OpenSSH 6.7+.
+- Directory write-back overwrites or creates files but never deletes remote files (no diffing).
 
 ## License
 

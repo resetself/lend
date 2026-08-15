@@ -65,18 +65,17 @@ cleanup() {
     info "Stopping existing processes..."
     pkill -f lendd 2>/dev/null || true
 
-    # Unmount all lend sshfs mounts
-    mount | grep "\.lend/files" | awk '{print $3}' | while read mnt; do
-        if mountpoint -q "$mnt"; then
-            fusermount -uz "$mnt" 2>/dev/null || umount -f "$mnt" 2>/dev/null || true
-        fi
+    # Kill any lingering reverse-forward ssh processes via their pid files
+    for pidfile in "$INSTALL_DIR"/forward/*.pid; do
+        [ -f "$pidfile" ] || continue
+        PID=$(cat "$pidfile" 2>/dev/null)
+        [ -n "$PID" ] && kill "$PID" 2>/dev/null || true
+        rm -f "$pidfile"
     done
-
-    pkill -f "sshfs.*\.lend" 2>/dev/null || true
 }
 
 setup_dirs() {
-    mkdir -p "$INSTALL_DIR"/{bin,ssh,scripts,files}
+    mkdir -p "$INSTALL_DIR"/{bin,ssh,scripts,files,forward}
 }
 
 setup_ssh_config() {
@@ -84,45 +83,76 @@ setup_ssh_config() {
 
     cat > "$INSTALL_DIR/ssh/config" << 'SSHEOF'
 Match !originalhost orb Exec "! ps -p $(ps -p $(sh -c 'echo $PPID') -o ppid=) | grep -q 'sftp'"
-	LocalCommand ~/.lend/scripts/local_handler.sh %n &
+	LocalCommand ~/.lend/scripts/ensure_forward.sh %n &
 	PermitLocalCommand yes
-	RemoteForward 4466 localhost:52698
-	RemoteCommand bash -c '{ mkdir -p $HOME/.lend/{bin,files/%n}; rm -f $HOME/.lend/files/%n/* 2>/dev/null; test -f $HOME/.lend/bin/lendctl || { if command -v gcc >/dev/null; then echo "install_lendctl" | curl -s --max-time 2 telnet://localhost:4466 | gcc -x c -o $HOME/.lend/bin/lendctl -; fi; test -f $HOME/.lend/bin/lendctl || { ARCH=$(uname -m | sed "s/x86_64/amd64/;s/aarch64/arm64/"); curl -fsSL "https://github.com/resetself/lend/releases/latest/download/lendctl_linux_${ARCH}" -o $HOME/.lend/bin/lendctl && chmod +x $HOME/.lend/bin/lendctl; }; }; grep -q ".lend/bin" "$HOME/.profile" || echo "export PATH=$PATH:$HOME/.lend/bin" >> $HOME/.profile; } 2>/dev/null; source $HOME/.profile 2>/dev/null; exec $(getent passwd $USER|cut -d: -f7) -l;'
+	RemoteCommand bash -c '{ mkdir -p $HOME/.lend/bin; test -f $HOME/.lend/bin/lendctl || { ARCH=$(uname -m | sed "s/x86_64/amd64/;s/aarch64/arm64/"); curl -fsSL "https://github.com/resetself/lend/releases/latest/download/lendctl_linux_${ARCH}" -o $HOME/.lend/bin/lendctl && chmod +x $HOME/.lend/bin/lendctl; }; grep -q ".lend/bin" "$HOME/.profile" 2>/dev/null || echo "export PATH=$PATH:$HOME/.lend/bin" >> $HOME/.profile; i=0; while [ $i -lt 15 ] && [ ! -S $HOME/.lend/bridge.sock ]; do sleep 0.2; i=$((i+1)); done; } 2>/dev/null; source $HOME/.profile 2>/dev/null; exec $(getent passwd $USER|cut -d: -f7) -l;'
 	RequestTTY yes
 	SetEnv TERM=xterm-256color
 SSHEOF
 
-    cat > "$INSTALL_DIR/scripts/local_handler.sh" << 'HANDLER'
+    cat > "$INSTALL_DIR/scripts/ensure_forward.sh" << 'HANDLER'
 #!/bin/bash
 HOST="$1"
-LOCAL_DIR="$HOME/.lend/files/$HOST"
+[ -n "$HOST" ] || exit 0
 
-# Get remote home directory
-REMOTE_HOME=$(ssh -o BatchMode=yes -o ConnectTimeout=2 "$HOST" 'echo $HOME' 2>/dev/null)
-REMOTE_HOME=${REMOTE_HOME:-/root}
-REMOTE_DIR="$REMOTE_HOME/.lend/files/$HOST"
+FORWARD_DIR="$HOME/.lend/forward"
+mkdir -p "$FORWARD_DIR"
+PIDFILE="$FORWARD_DIR/$HOST.pid"
+LOCK="$FORWARD_DIR/$HOST.lock"
 
-# Start lendd if not running
-if ! lsof -i :52698 >/dev/null 2>&1; then
+# Fast path: a forward for this host is already alive.
+if [ -f "$PIDFILE" ]; then
+    PID=$(cat "$PIDFILE" 2>/dev/null)
+    if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+        exit 0
+    fi
+    rm -f "$PIDFILE"
+fi
+
+# Serialize concurrent startup attempts from parallel ssh sessions.
+if ! mkdir "$LOCK" 2>/dev/null; then
+    exit 0
+fi
+trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+
+# Re-check after acquiring the lock.
+if [ -f "$PIDFILE" ]; then
+    PID=$(cat "$PIDFILE" 2>/dev/null)
+    if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+        exit 0
+    fi
+fi
+
+# Make sure the local daemon is running.
+if ! [ -S "$HOME/.lend/lendd.sock" ]; then
     "$HOME/.lend/bin/lendd" >/dev/null 2>&1 &
 fi
 
-mkdir -p "$LOCAL_DIR"
+# Resolve the remote home. Disable RemoteCommand (would hijack `echo $HOME`)
+# and PermitLocalCommand (would recurse into this script).
+REMOTE_HOME=$(ssh -o PermitLocalCommand=no -o RemoteCommand=none -o BatchMode=yes -o ConnectTimeout=5 "$HOST" 'echo $HOME' 2>/dev/null)
+REMOTE_HOME=${REMOTE_HOME:-/root}
 
-# Skip if already mounted
-mount | grep -q " $LOCAL_DIR " && exit 0
+# Prepare the remote socket directory and drop any stale socket.
+ssh -o PermitLocalCommand=no -o RemoteCommand=none -o BatchMode=yes -o ConnectTimeout=5 "$HOST" \
+    "mkdir -p '$REMOTE_HOME/.lend' && chmod 700 '$REMOTE_HOME/.lend' && rm -f '$REMOTE_HOME/.lend/bridge.sock'" 2>/dev/null
 
-# Clean up stale mount
-fusermount -uz "$LOCAL_DIR" 2>/dev/null || umount -f "$LOCAL_DIR" 2>/dev/null
+# Start a persistent reverse forward, decoupled from the interactive session.
+nohup ssh -N \
+    -o PermitLocalCommand=no \
+    -o RemoteCommand=none \
+    -o ExitOnForwardFailure=yes \
+    -o StreamLocalBindUnlink=yes \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=3 \
+    -o ControlMaster=no \
+    -o ControlPersist=no \
+    -R "$REMOTE_HOME/.lend/bridge.sock:$HOME/.lend/lendd.sock" \
+    "$HOST" >/dev/null 2>&1 &
 
-# Mount with retry
-for i in 1 2 3; do
-    sshfs "$HOST:$REMOTE_DIR" "$LOCAL_DIR" -o follow_symlinks,reconnect,ServerAliveInterval=15 2>/dev/null
-    mount | grep -q " $LOCAL_DIR " && exit 0
-    sleep 1
-done
+echo $! > "$PIDFILE"
 HANDLER
-    chmod +x "$INSTALL_DIR/scripts/local_handler.sh"
+    chmod +x "$INSTALL_DIR/scripts/ensure_forward.sh"
 
     SSH_CONFIG="$HOME/.ssh/config"
     INCLUDE_LINE="Include ~/.lend/ssh/config"
@@ -139,7 +169,6 @@ HANDLER
 setup_path() {
     CURRENT_SHELL=$(basename "$SHELL")
 
-    # 根据 Shell 类型设置配置文件路径和 PATH 添加语法
     case "$CURRENT_SHELL" in
         bash)
             RC_FILE="$HOME/.bashrc"
@@ -162,11 +191,11 @@ setup_path() {
             CHECK_PATTERN='\.lend/bin'
             ;;
         tcsh|csh)
-            RC_FILE="$HOME/.tcshrc"   # 或 .cshrc
+            RC_FILE="$HOME/.tcshrc"
             EXPORT_LINE='setenv PATH ${PATH}:$HOME/.lend/bin'
             CHECK_PATTERN='\.lend/bin'
             ;;
-        sh)   # 通常为 POSIX sh，使用 .profile
+        sh)
             RC_FILE="$HOME/.profile"
             EXPORT_LINE='export PATH="$PATH:$HOME/.lend/bin"'
             CHECK_PATTERN='\.lend/bin'
@@ -177,28 +206,13 @@ setup_path() {
             ;;
     esac
 
-    # 确保配置文件所在的目录存在（例如 ~/.config/fish/）
     mkdir -p "$(dirname "$RC_FILE")" 2>/dev/null
 
-    # 检查并添加（如果尚未存在）
     if ! grep -q "$CHECK_PATTERN" "$RC_FILE" 2>/dev/null; then
         echo "$EXPORT_LINE" >> "$RC_FILE"
         echo "Added PATH to $RC_FILE"
     else
         echo "PATH already configured in $RC_FILE"
-    fi
-}
-
-check_deps() {
-    if ! command -v sshfs &>/dev/null; then
-        warn "sshfs not found, please install:"
-        if [[ "$OSTYPE" == "darwin"* ]]; then
-            echo "  brew install macfuse sshfs"
-            echo "  or: brew install macos-fuse-t/homebrew-cask/fuse-t-sshfs"
-        else
-            echo "  sudo apt install sshfs  # Debian/Ubuntu"
-            echo "  sudo yum install sshfs  # CentOS/RHEL"
-        fi
     fi
 }
 
@@ -213,7 +227,6 @@ main() {
     download_binary
     setup_ssh_config
     setup_path
-    check_deps
 
     info "Installation complete!"
     echo ""
