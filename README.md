@@ -54,12 +54,17 @@ There is no SSHFS mount and no FUSE dependency. Directories are transferred as a
 
 ### 1. Install lend (local machine)
 
-* One-line install:
+* One-line install (prebuilt binary):
 ```bash
 curl -fsSL https://raw.githubusercontent.com/resetself/lend/main/install.sh | bash
 ```
 
-* Build from source:
+* One-line install from source (requires Go, no prebuilt release needed):
+```bash
+curl -fsSL https://raw.githubusercontent.com/resetself/lend/main/install.sh | bash -s -- --build
+```
+
+* Build from a checkout:
 ```bash
 git clone https://github.com/resetself/lend.git
 cd lend && make && make install

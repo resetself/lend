@@ -12,9 +12,9 @@ lendctl:
 clean:
 	rm -rf build
 
-install: lendd
+install: lendd lendctl
 	@mkdir -p $(HOME)/.lend/bin
-	@cp build/lendd $(HOME)/.lend/bin/
+	@cp build/lendd build/lendctl $(HOME)/.lend/bin/
 	@./install.sh --local
 
 .PHONY: all clean install lendd lendctl

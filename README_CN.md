@@ -54,12 +54,17 @@ ffmpeg -i video.mp4 video.webm
 
 ### 1. 安装 lend（本地机器）
 
-* 一键安装
+* 一键安装（预编译二进制）
 ```bash
 curl -fsSL https://raw.githubusercontent.com/resetself/lend/main/install.sh | bash
 ```
 
-* 从源码安装
+* 一键从源码编译安装（需要 Go，无需预编译 release）
+```bash
+curl -fsSL https://raw.githubusercontent.com/resetself/lend/main/install.sh | bash -s -- --build
+```
+
+* 从本地检出目录编译安装
 ```bash
 git clone https://github.com/resetself/lend.git
 cd lend && make && make install

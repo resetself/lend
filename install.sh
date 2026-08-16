@@ -15,9 +15,13 @@ warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
 LOCAL_MODE=0
-if [ "$1" = "--local" ]; then
-    LOCAL_MODE=1
-fi
+BUILD_MODE=0
+for arg in "$@"; do
+    case "$arg" in
+        --local) LOCAL_MODE=1 ;;
+        --build) BUILD_MODE=1 ;;
+    esac
+done
 
 detect_platform() {
     OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -57,6 +61,47 @@ download_binary() {
     mkdir -p "$BIN_DIR"
     curl -fsSL "$DOWNLOAD_URL" -o "$BIN_DIR/lendd"
     chmod +x "$BIN_DIR/lendd"
+
+    info "Installed to $BIN_DIR/lendd"
+}
+
+build_from_source() {
+    info "Building from source..."
+
+    command -v go >/dev/null 2>&1 || error "Go is required for source build (omit --build to download a prebuilt binary)"
+
+    local SRC_DIR=""
+    local CLONE_DIR=""
+    if [ -d "lend/cmd/lendd" ] && [ -f "lend/go.mod" ]; then
+        # Invoked from inside the repository checkout.
+        SRC_DIR="$PWD"
+    else
+        info "Cloning $REPO (depth 1)..."
+        CLONE_DIR=$(mktemp -d)
+        git clone --depth 1 "https://github.com/$REPO.git" "$CLONE_DIR" 2>/dev/null || {
+            rm -rf "$CLONE_DIR"
+            error "Failed to clone $REPO"
+        }
+        SRC_DIR="$CLONE_DIR"
+    fi
+
+    mkdir -p "$BIN_DIR"
+
+    info "Compiling lendd (go build)..."
+    (cd "$SRC_DIR/lend" && go build -o "$BIN_DIR/lendd" ./cmd/lendd) || {
+        [ -n "$CLONE_DIR" ] && rm -rf "$CLONE_DIR"
+        error "go build failed"
+    }
+
+    if command -v gcc >/dev/null 2>&1; then
+        info "Compiling lendctl (gcc)..."
+        gcc -O2 -o "$BIN_DIR/lendctl" "$SRC_DIR/lend/cmd/lendctl/lendctl.c" 2>/dev/null || \
+            warn "lendctl build skipped (runs on the remote; not required locally)"
+    else
+        warn "gcc not found; skipping lendctl (it compiles on the remote via install_lendctl)"
+    fi
+
+    [ -n "$CLONE_DIR" ] && rm -rf "$CLONE_DIR"
 
     info "Installed to $BIN_DIR/lendd"
 }
@@ -222,9 +267,13 @@ main() {
     echo ""
 
     cleanup
-    detect_platform
     setup_dirs
-    download_binary
+    if [ "$BUILD_MODE" = "1" ]; then
+        build_from_source
+    else
+        detect_platform
+        download_binary
+    fi
     setup_ssh_config
     setup_path
 
