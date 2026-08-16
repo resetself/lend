@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/types.h>
 #include <dirent.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -263,6 +264,19 @@ static int classify(const char* p) {
     return K_STR;
 }
 
+/* GUI editors that fork and return: handled as a background live-sync session
+ * (keep this list in sync with waitFlags in lendd.go). */
+static int is_editor(const char* tool) {
+    static const char* editors[] = {
+        "subl", "sublime", "sublime_text", "code", "code-insiders",
+        "atom", "gedit", "kate", NULL
+    };
+    for (int i = 0; editors[i]; i++) {
+        if (!strcmp(tool, editors[i])) return 1;
+    }
+    return 0;
+}
+
 /* ---------- response handling ---------- */
 
 static int mkdir_p(const char* path) {
@@ -461,6 +475,48 @@ static int handle_response(int fd, int nargs, char** args, const int* kinds) {
     return exit_code;
 }
 
+/* Long-lived edit session: receive UPDATE/TREE frames pushed by lendd on each
+ * save, write them back to the remote paths, and exit on SESSION_END. */
+static int edit_loop(int fd, int nargs, char** args, const int* kinds) {
+    char line[256];
+    if (read_line(fd, line, sizeof(line)) < 0) return 1;
+    if (strncmp(line, "EDIT", 4) != 0) return 1; /* not an edit session */
+
+    for (;;) {
+        if (read_line(fd, line, sizeof(line)) < 0) return 1;
+
+        if (strncmp(line, "SESSION_END", 11) == 0) return 0;
+
+        if (strncmp(line, "UPDATE ", 7) == 0) {
+            char* sp = strchr(line + 7, ' ');
+            if (!sp) return 1;
+            *sp = '\0';
+            int idx = atoi(line + 7);
+            long len = atol(sp + 1);
+            if (idx < 0 || idx >= nargs || kinds[idx] != K_FILE) return 1;
+            size_t plen = 0;
+            char* payload = read_payload(fd, len, &plen);
+            if (!payload && len > 0) return 1;
+            (void)write_file_at(args[idx], payload ? payload : "", plen);
+            free(payload);
+        } else if (strncmp(line, "TREE ", 5) == 0) {
+            char* sp = strchr(line + 5, ' ');
+            if (!sp) return 1;
+            *sp = '\0';
+            int idx = atoi(line + 5);
+            long len = atol(sp + 1);
+            if (idx < 0 || idx >= nargs || kinds[idx] != K_DIR) return 1;
+            size_t plen = 0;
+            char* payload = read_payload(fd, len, &plen);
+            if (!payload && len > 0) return 1;
+            (void)apply_tree(payload ? payload : "", plen, args[idx]);
+            free(payload);
+        } else {
+            return 1;
+        }
+    }
+}
+
 /* ---------- misc ---------- */
 
 static int connect_bridge(void) {
@@ -577,7 +633,28 @@ int main(int argc, char* argv[]) {
 
     int exit_code = 1;
     if (send_rc == 0) {
-        exit_code = handle_response(fd, nargs, &argv[start], kinds);
+        if (is_editor(tool)) {
+            /* Editor: fork a detached background process to stream saves back
+             * to the remote paths, while the foreground returns immediately. */
+            pid_t pid = fork();
+            if (pid == 0) {
+                setsid();
+                int nullfd = open("/dev/null", O_RDWR);
+                if (nullfd >= 0) {
+                    dup2(nullfd, STDIN_FILENO);
+                    dup2(nullfd, STDOUT_FILENO);
+                    dup2(nullfd, STDERR_FILENO);
+                    if (nullfd > 2) close(nullfd);
+                }
+                int rc = edit_loop(fd, nargs, &argv[start], kinds);
+                close(fd);
+                free(kinds);
+                _exit(rc);
+            }
+            exit_code = (pid < 0) ? 1 : 0;
+        } else {
+            exit_code = handle_response(fd, nargs, &argv[start], kinds);
+        }
     }
 
     free(kinds);

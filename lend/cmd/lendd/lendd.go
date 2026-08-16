@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const maxBlobSize = 1 << 30 // 1GB guard against malformed length fields
@@ -177,7 +178,11 @@ func handle(conn net.Conn) {
 		}
 	}
 
-	run(conn, tool, args)
+	if _, ok := waitFlags[filepath.Base(tool)]; ok {
+		runEdit(conn, tool, args)
+	} else {
+		run(conn, tool, args)
+	}
 }
 
 func lendctlInstall(conn net.Conn) {
@@ -193,51 +198,9 @@ func run(conn net.Conn, tool string, args []arg) {
 	}
 	defer os.RemoveAll(workdir)
 
-	cmdArgs := make([]string, 0, len(args))
-	used := map[string]int{}
-
-	for i := range args {
-		a := &args[i]
-		switch a.kind {
-		case "S":
-			cmdArgs = append(cmdArgs, string(a.data))
-		case "F":
-			name := dedup(used, safeName(a.name))
-			dst := filepath.Join(workdir, name)
-			if err := os.WriteFile(dst, a.data, 0644); err != nil {
-				log.Printf("write file %s: %v", dst, err)
-				return
-			}
-			a.matPath = dst
-			cmdArgs = append(cmdArgs, dst)
-		case "D":
-			name := dedup(used, safeName(a.name))
-			dst := filepath.Join(workdir, name)
-			if err := os.MkdirAll(dst, 0755); err != nil {
-				log.Printf("mkdir %s: %v", dst, err)
-				return
-			}
-			if err := readTree(a.data, dst); err != nil {
-				log.Printf("extract tree %s: %v", dst, err)
-				return
-			}
-			a.matPath = dst
-			cmdArgs = append(cmdArgs, dst)
-		case "O":
-			// Output file: materialize the path but do not create it, so we can
-			// detect whether the tool actually produced it.
-			name := dedup(used, safeName(a.name))
-			dst := filepath.Join(workdir, name)
-			a.matPath = dst
-			cmdArgs = append(cmdArgs, dst)
-		}
-	}
-
-	// Fork-and-return GUI editors (subl, code, ...) exit immediately, so append
-	// their wait flag to block until the user closes the editor, keeping the
-	// workdir alive and pushing results back after the edit.
-	if flags, ok := waitFlags[filepath.Base(tool)]; ok {
-		cmdArgs = append(cmdArgs, flags...)
+	cmdArgs, ok := materialize(workdir, args)
+	if !ok {
+		return
 	}
 
 	cmd := exec.Command(tool, cmdArgs...)
@@ -300,6 +263,164 @@ func run(conn net.Conn, tool string, args []arg) {
 
 	if err := w.Flush(); err != nil {
 		log.Printf("flush response: %v", err)
+	}
+}
+
+// materialize writes F/D/O args into the workdir and returns the exec args,
+// populating each arg's matPath. ok is false if any materialization failed.
+func materialize(workdir string, args []arg) (cmdArgs []string, ok bool) {
+	cmdArgs = make([]string, 0, len(args))
+	used := map[string]int{}
+	for i := range args {
+		a := &args[i]
+		switch a.kind {
+		case "S":
+			cmdArgs = append(cmdArgs, string(a.data))
+		case "F":
+			name := dedup(used, safeName(a.name))
+			dst := filepath.Join(workdir, name)
+			if err := os.WriteFile(dst, a.data, 0644); err != nil {
+				log.Printf("write file %s: %v", dst, err)
+				return nil, false
+			}
+			a.matPath = dst
+			cmdArgs = append(cmdArgs, dst)
+		case "D":
+			name := dedup(used, safeName(a.name))
+			dst := filepath.Join(workdir, name)
+			if err := os.MkdirAll(dst, 0755); err != nil {
+				log.Printf("mkdir %s: %v", dst, err)
+				return nil, false
+			}
+			if err := readTree(a.data, dst); err != nil {
+				log.Printf("extract tree %s: %v", dst, err)
+				return nil, false
+			}
+			a.matPath = dst
+			cmdArgs = append(cmdArgs, dst)
+		case "O":
+			// Output file: materialize the path but do not create it, so we can
+			// detect whether the tool actually produced it.
+			name := dedup(used, safeName(a.name))
+			dst := filepath.Join(workdir, name)
+			a.matPath = dst
+			cmdArgs = append(cmdArgs, dst)
+		}
+	}
+	return cmdArgs, true
+}
+
+func writeUpdate(w *bufio.Writer, idx int, data []byte) {
+	fmt.Fprintf(w, "UPDATE %d %d\n", idx, len(data))
+	_, _ = w.Write(data)
+}
+
+func writeTreeFrame(w *bufio.Writer, idx int, blob []byte) {
+	fmt.Fprintf(w, "TREE %d %d\n", idx, len(blob))
+	_, _ = w.Write(blob)
+}
+
+// runEdit handles GUI editors as a live-sync session: the editor is started in
+// the background (with its wait flag), and lendd streams every save back to the
+// client immediately, ending the session (and removing the temp files) when the
+// editor closes the file/window.
+func runEdit(conn net.Conn, tool string, args []arg) {
+	workdir, err := os.MkdirTemp(filepath.Join(baseDir, "files"), "run-")
+	if err != nil {
+		log.Printf("MkdirTemp: %v", err)
+		return
+	}
+	defer os.RemoveAll(workdir)
+
+	cmdArgs, ok := materialize(workdir, args)
+	if !ok {
+		return
+	}
+	cmdArgs = append(cmdArgs, waitFlags[filepath.Base(tool)]...)
+
+	cmd := exec.Command(tool, cmdArgs...)
+	cmd.Dir = workdir
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Start(); err != nil {
+		w := bufio.NewWriter(conn)
+		fmt.Fprintf(w, "RESULT 127\n")
+		writeFrame(w, "SO", nil)
+		writeFrame(w, "SE", []byte(err.Error()))
+		_ = w.Flush()
+		return
+	}
+	defer func() { _ = cmd.Process.Kill() }()
+
+	bw := bufio.NewWriter(conn)
+	if _, err := bw.WriteString("EDIT\n"); err != nil || bw.Flush() != nil {
+		return
+	}
+
+	done := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(done)
+	}()
+
+	lastF := make(map[int][]byte)
+	lastD := make(map[int][]byte)
+	for i := range args {
+		switch args[i].kind {
+		case "F":
+			lastF[i] = args[i].data
+		case "D":
+			if b, err := writeTree(args[i].matPath); err == nil {
+				lastD[i] = b
+			}
+		}
+	}
+
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-done:
+			// Editor closed: push any final unsynced change, then end.
+			for i := range args {
+				switch args[i].kind {
+				case "F":
+					if data, err := os.ReadFile(args[i].matPath); err == nil && !bytes.Equal(data, lastF[i]) {
+						writeUpdate(bw, i, data)
+					}
+				case "D":
+					if blob, err := writeTree(args[i].matPath); err == nil && !bytes.Equal(blob, lastD[i]) {
+						writeTreeFrame(bw, i, blob)
+					}
+				}
+			}
+			_, _ = bw.WriteString("SESSION_END\n")
+			_ = bw.Flush()
+			return
+		case <-ticker.C:
+			for i := range args {
+				switch args[i].kind {
+				case "F":
+					data, err := os.ReadFile(args[i].matPath)
+					if err != nil || bytes.Equal(data, lastF[i]) {
+						continue
+					}
+					writeUpdate(bw, i, data)
+					lastF[i] = data
+				case "D":
+					blob, err := writeTree(args[i].matPath)
+					if err != nil || bytes.Equal(blob, lastD[i]) {
+						continue
+					}
+					writeTreeFrame(bw, i, blob)
+					lastD[i] = blob
+				}
+			}
+			if bw.Flush() != nil {
+				return // client disconnected
+			}
+		}
 	}
 }
 

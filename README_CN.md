@@ -108,13 +108,17 @@ prettier --write *.js
 
 ### GUI 编辑器
 
-像 `subl`、`code` 这类"启动后立即返回"的 GUI 编辑器，会在你编辑完成前就退出，导致 `lendd` 回传的还是未修改的内容，并在编辑器仍打开时就把临时目录删掉。为避免这种情况，`lendd` 会自动追加编辑器的等待选项，让命令一直保持到窗口关闭：
+GUI 编辑器以**实时同步会话**方式运行，而不是阻塞式命令。`lendctl` 会立即返回 shell，同时一个后台小进程会把你每次保存实时推回远程文件：
 
 ```bash
-subl file.txt      # 实际执行 subl -w file.txt
-code file.txt      # 实际执行 code -w file.txt
-code project/      # 实际执行 code -w project/
+subl file.txt      # 本地打开，立即返回
+code file.txt
+code project/      # 目录编辑也会在每次保存时同步
 ```
+
+- **每次保存**都会立即推回远程文件（无需等待或关闭）。
+- **关闭文件/窗口时**，会话结束，本地临时副本被删除。
+- 远程 shell 永不阻塞；同步在一个脱离终端的后台进程中运行。
 
 已自动识别 `subl`/`sublime`/`sublime_text`、`code`/`code-insiders`、`atom`、`gedit` 和 `kate`。其它编辑器请手动传入等待选项（如 `some-editor --wait file.txt`）。`vim` 等终端编辑器需要 TTY，不适合后台守护进程模式。
 
