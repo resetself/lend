@@ -124,7 +124,7 @@ This is recognized for `subl`/`sublime`/`sublime_text`, `code`/`code-insiders`, 
 
 When you open a directory, the whole tree (including dotfiles, nested subdirectories, and symlinks) is materialized locally first, so the editor reads every file before you edit.
 
-> **Directory sessions**: Sublime Text's `-w` flag only waits for *files*, so `subl -w dir/` alone would return immediately while the window stays open. To get a reliable close signal, Lend opens an empty `.lend-wait` sentinel file alongside the folder; closing the window also closes the sentinel, which unblocks `-w` and ends the session immediately (removing the temp copy). Editors whose wait flag already blocks for folders (VS Code `code -w dir/`) need no sentinel and end the moment the window closes. You may see one extra empty `.lend-wait` tab in the editor — leave it alone; it is what ties the session lifetime to the window.
+> **Directory sessions in Sublime Text**: Sublime's `-w` flag only waits for *files*, so `subl -w dir/` alone would return immediately while the window stays open. To detect the window close cleanly, Lend installs a tiny window-watcher plugin into Sublime's `Packages/User` (`lend.py`); it reports the folders open across all windows, and Lend ends the directory session the moment that window is closed. **Restart Sublime once** after installing or updating Lend so the plugin loads — until then, Lend falls back to an empty `.lend-wait` tab that ties the session to the window (leave it alone). VS Code (`code -w dir/`) already blocks for folders and needs no plugin.
 
 ## How arguments are classified
 
