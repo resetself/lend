@@ -277,6 +277,16 @@ static int is_editor(const char* tool) {
     return 0;
 }
 
+/* An editor is only treated as a live-sync session when it has a file or
+ * directory argument to edit. Flag/help (`subl -h`), version, and no-arg
+ * invocations fall back to a normal synchronous run that returns its output. */
+static int has_file_or_dir(const int* kinds, int nargs) {
+    for (int i = 0; i < nargs; i++) {
+        if (kinds[i] == K_FILE || kinds[i] == K_DIR) return 1;
+    }
+    return 0;
+}
+
 /* ---------- response handling ---------- */
 
 static int mkdir_p(const char* path) {
@@ -633,12 +643,14 @@ int main(int argc, char* argv[]) {
 
     int exit_code = 1;
     if (send_rc == 0) {
-        if (is_editor(tool)) {
-            /* Editor: fork a detached background process to stream saves back
-             * to the remote paths, while the foreground returns immediately. */
+        if (is_editor(tool) && has_file_or_dir(kinds, nargs)) {
+            /* Editor: fork a background process to stream saves back to the
+             * remote paths while the foreground returns immediately. The child
+             * deliberately stays in the SSH session (no setsid) so that when
+             * the user logs out, sshd's SIGHUP kills it, the socket closes,
+             * and lendd removes the local temp copy. */
             pid_t pid = fork();
             if (pid == 0) {
-                setsid();
                 int nullfd = open("/dev/null", O_RDWR);
                 if (nullfd >= 0) {
                     dup2(nullfd, STDIN_FILENO);

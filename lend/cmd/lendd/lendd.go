@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"io"
 	"lend"
@@ -13,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -35,23 +33,6 @@ var waitFlags = map[string][]string{
 	"atom":          {"-w"},
 	"gedit":         {"-w"},
 	"kate":          {"--block"},
-}
-
-// dirBlockers lists editors whose wait flag already blocks for a directory
-// window (so the editor process exiting is a reliable "closed" signal, needing
-// no extra machinery).
-var dirBlockers = map[string]bool{
-	"code":          true,
-	"code-insiders": true,
-}
-
-// sublimeEditors lists the Sublime Text CLI entry points. For a directory
-// argument these get close detection from the Lend Sublime plugin (see
-// sublime/lend.py) instead of a .lend-wait sentinel file.
-var sublimeEditors = map[string]bool{
-	"subl":         true,
-	"sublime":      true,
-	"sublime_text": true,
 }
 
 var (
@@ -87,11 +68,6 @@ func main() {
 	_ = os.Chmod(socketPath, 0600)
 
 	log.Printf("Listening on %s", socketPath)
-
-	// Install the Sublime window-watcher plugin (best-effort) so directory
-	// sessions in Sublime Text can detect when the window is closed without
-	// an extra sentinel tab.
-	installSublimePlugin()
 
 	for {
 		conn, err := ln.Accept()
@@ -202,11 +178,24 @@ func handle(conn net.Conn) {
 		}
 	}
 
-	if _, ok := waitFlags[filepath.Base(tool)]; ok {
+	if _, ok := waitFlags[filepath.Base(tool)]; ok && hasFileOrDir(args) {
 		runEdit(conn, tool, args)
 	} else {
 		run(conn, tool, args)
 	}
+}
+
+// hasFileOrDir reports whether any argument is a file or directory to edit.
+// Editor tools are only routed to the live-sync session when there is at least
+// one, so `subl -h` / `code --version` / `subl` run synchronously and return
+// their output to the remote.
+func hasFileOrDir(args []arg) bool {
+	for i := range args {
+		if args[i].kind == "F" || args[i].kind == "D" {
+			return true
+		}
+	}
+	return false
 }
 
 func lendctlInstall(conn net.Conn) {
@@ -346,8 +335,16 @@ func writeTreeFrame(w *bufio.Writer, idx int, blob []byte) {
 
 // runEdit handles GUI editors as a live-sync session: the editor is started in
 // the background (with its wait flag), and lendd streams every save back to the
-// client immediately, ending the session (and removing the temp files) when the
-// editor closes the file/window.
+// client immediately.
+//
+// Ending the session is editor-agnostic. For files the wait flag blocks until
+// the file is closed, so the editor process exiting ends the session. For
+// directories some editors' wait flag also blocks (`code -w dir`), while others
+// return immediately (`subl -w dir`). We detect which case we're in with a
+// short grace period: if the editor is still running when it elapses, -w blocks
+// and its exit ends the session; if it already exited, -w didn't block, so the
+// directory window is still open and we keep syncing until an idle timeout
+// (no saves) elapses.
 func runEdit(conn net.Conn, tool string, args []arg) {
 	workdir, err := os.MkdirTemp(filepath.Join(baseDir, "files"), "run-")
 	if err != nil {
@@ -361,7 +358,6 @@ func runEdit(conn net.Conn, tool string, args []arg) {
 		return
 	}
 
-	base := filepath.Base(tool)
 	hasDir := false
 	for i := range args {
 		if args[i].kind == "D" {
@@ -370,30 +366,7 @@ func runEdit(conn net.Conn, tool string, args []arg) {
 		}
 	}
 
-	// Close detection for a directory window:
-	//   - code/code-insiders: their -w already blocks for a folder, so the
-	//     editor process exiting is the close signal.
-	//   - Sublime Text: `subl -w dir` returns immediately. Prefer its
-	//     window-watcher plugin (no visible artifact); if the plugin isn't
-	//     loaded yet (its marker isn't fresh) fall back to a .lend-wait
-	//     sentinel whose close unblocks -w.
-	usePlugin := false
-	if hasDir && sublimeEditors[base] && sublimePluginActive() {
-		usePlugin = true
-	}
-
-	if usePlugin {
-		// `subl dir` returns immediately; the plugin's marker file reports
-		// when the window closes.
-	} else {
-		if hasDir && !dirBlockers[base] {
-			sentinel := filepath.Join(workdir, ".lend-wait")
-			if err := os.WriteFile(sentinel, nil, 0644); err == nil {
-				cmdArgs = append(cmdArgs, sentinel)
-			}
-		}
-		cmdArgs = append(cmdArgs, waitFlags[base]...)
-	}
+	cmdArgs = append(cmdArgs, waitFlags[filepath.Base(tool)]...)
 
 	cmd := exec.Command(tool, cmdArgs...)
 	cmd.Dir = workdir
@@ -433,8 +406,10 @@ func runEdit(conn net.Conn, tool string, args []arg) {
 		}
 	}
 
-	// syncArgs pushes any changed F/D args back to the client.
-	syncArgs := func() {
+	// syncArgs pushes any changed F/D args back to the client and reports
+	// whether anything changed.
+	syncArgs := func() bool {
+		changed := false
 		for i := range args {
 			switch args[i].kind {
 			case "F":
@@ -444,6 +419,7 @@ func runEdit(conn net.Conn, tool string, args []arg) {
 				}
 				writeUpdate(bw, i, data)
 				lastF[i] = data
+				changed = true
 			case "D":
 				blob, err := writeTree(args[i].matPath)
 				if err != nil || bytes.Equal(blob, lastD[i]) {
@@ -451,32 +427,51 @@ func runEdit(conn net.Conn, tool string, args []arg) {
 				}
 				writeTreeFrame(bw, i, blob)
 				lastD[i] = blob
+				changed = true
 			}
 		}
+		return changed
 	}
 
-	// When using the plugin, watch the marker for the directory's presence.
-	var dirPath string
-	if usePlugin {
-		for i := range args {
-			if args[i].kind == "D" {
-				dirPath = args[i].matPath
-				break
-			}
-		}
-	}
-	armed := false
-	launchTime := time.Now()
+	const gracePeriod = 3 * time.Second
+	idleTimeout := dirIdleTimeout()
 
+	// mode starts as "grace": we are waiting to see whether the editor's wait
+	// flag blocks. If it is still running when the grace period elapses, it
+	// blocks ("wait"); if it exited early on a directory arg, -w didn't block
+	// and the window is still open ("idle").
+	mode := "grace"
+	idleSince := time.Now()
+
+	graceTimer := time.NewTimer(gracePeriod)
+	defer graceTimer.Stop()
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 
+	// Detect when the client goes away (e.g. the sync child is SIGHUP'd when
+	// the user logs out of the SSH session). The child never sends data after
+	// the request, so a read that returns EOF/error means it disconnected.
+	clientGone := make(chan struct{})
+	go func() {
+		buf := make([]byte, 1)
+		for {
+			if _, err := conn.Read(buf); err != nil {
+				close(clientGone)
+				return
+			}
+		}
+	}()
+
 	for {
 		select {
+		case <-clientGone:
+			return // client disconnected; defer removes the temp workdir
 		case <-done:
-			if usePlugin {
-				// `subl dir` exits immediately; close is detected via the
-				// plugin marker, so ignore this and keep syncing.
+			if mode == "grace" && hasDir {
+				// -w returned during the grace window, so it does not block
+				// for a directory: the window is still open. Keep syncing
+				// until idle.
+				mode = "idle"
 				done = nil
 				continue
 			}
@@ -485,22 +480,19 @@ func runEdit(conn net.Conn, tool string, args []arg) {
 			_, _ = bw.WriteString("SESSION_END\n")
 			_ = bw.Flush()
 			return
+		case <-graceTimer.C:
+			if mode == "grace" {
+				mode = "wait"
+			}
 		case <-ticker.C:
-			syncArgs()
-			if usePlugin {
-				folders, ts, ok := readSublimeFolders()
-				fresh := ok && time.Since(ts) < 30*time.Second
-				if ok && containsPath(folders, dirPath) {
-					armed = true
-				} else if armed || !fresh || time.Since(launchTime) > 20*time.Second {
-					// The folder left the marker (window closed), the plugin
-					// stopped reporting (app quit / unloaded), or the folder
-					// never appeared. End the session.
-					syncArgs()
-					_, _ = bw.WriteString("SESSION_END\n")
-					_ = bw.Flush()
-					return
-				}
+			if syncArgs() {
+				idleSince = time.Now()
+			}
+			if mode == "idle" && time.Since(idleSince) > idleTimeout {
+				syncArgs()
+				_, _ = bw.WriteString("SESSION_END\n")
+				_ = bw.Flush()
+				return
 			}
 			if bw.Flush() != nil {
 				return // client disconnected
@@ -509,92 +501,17 @@ func runEdit(conn net.Conn, tool string, args []arg) {
 	}
 }
 
-// ---- Sublime plugin helpers ----
-
-// sublimeUserDir returns the Sublime Text User packages directory for the
-// current platform (best-effort; returns "" if the home dir is unavailable).
-func sublimeUserDir() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	if runtime.GOOS == "darwin" {
-		return filepath.Join(home, "Library", "Application Support", "Sublime Text", "Packages", "User")
-	}
-	cfg := os.Getenv("XDG_CONFIG_HOME")
-	if cfg == "" {
-		cfg = filepath.Join(home, ".config")
-	}
-	return filepath.Join(cfg, "sublime-text", "Packages", "User")
-}
-
-// installSublimePlugin writes the embedded window-watcher plugin into Sublime
-// Text's User packages dir (idempotent, best-effort).
-func installSublimePlugin() {
-	dir := sublimeUserDir()
-	if dir == "" {
-		return
-	}
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		log.Printf("install Sublime plugin: %v", err)
-		return
-	}
-	dst := filepath.Join(dir, "lend.py")
-	if existing, err := os.ReadFile(dst); err == nil && bytes.Equal(existing, lend.SublimePlugin) {
-		return // already up to date
-	}
-	if err := os.WriteFile(dst, lend.SublimePlugin, 0644); err != nil {
-		log.Printf("install Sublime plugin: %v", err)
-		return
-	}
-	log.Printf("Installed Sublime plugin at %s (restart Sublime if it is already running)", dst)
-}
-
-// readSublimeFolders reads the plugin's marker file: the folders currently
-// open across all Sublime windows plus the time of the last update.
-func readSublimeFolders() (folders []string, ts time.Time, ok bool) {
-	data, err := os.ReadFile(filepath.Join(baseDir, "sublime_windows.json"))
-	if err != nil {
-		return nil, time.Time{}, false
-	}
-	var v struct {
-		Ts      float64  `json:"ts"`
-		Folders []string `json:"folders"`
-	}
-	if err := json.Unmarshal(data, &v); err != nil {
-		return nil, time.Time{}, false
-	}
-	return v.Folders, time.Unix(int64(v.Ts), 0), true
-}
-
-// sublimePluginActive reports whether the plugin has written a fresh marker,
-// i.e. it is loaded and its heartbeat is running.
-func sublimePluginActive() bool {
-	_, ts, ok := readSublimeFolders()
-	return ok && time.Since(ts) < 30*time.Second
-}
-
-// containsPath reports whether folders contains target, canonicalizing both
-// sides through symlinks (macOS /tmp -> /private/tmp) before comparing.
-func containsPath(folders []string, target string) bool {
-	for _, f := range folders {
-		if samePath(f, target) {
-			return true
+// dirIdleTimeout returns how long a directory session is kept alive in an
+// editor whose wait flag does not block for directories (e.g. Sublime Text)
+// before it is ended and the temp copy removed. Configurable via
+// LEND_DIR_IDLE_TIMEOUT (Go duration format, e.g. 5m); defaults to 2 minutes.
+func dirIdleTimeout() time.Duration {
+	if s := os.Getenv("LEND_DIR_IDLE_TIMEOUT"); s != "" {
+		if d, err := time.ParseDuration(s); err == nil && d > 0 {
+			return d
 		}
 	}
-	return false
-}
-
-func samePath(a, b string) bool {
-	if a == b {
-		return true
-	}
-	if ra, err := filepath.EvalSymlinks(a); err == nil {
-		if rb, err := filepath.EvalSymlinks(b); err == nil {
-			return ra == rb
-		}
-	}
-	return filepath.Clean(a) == filepath.Clean(b)
+	return 2 * time.Minute
 }
 
 // ---- wire helpers ----

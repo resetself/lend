@@ -6,6 +6,3 @@ import (
 
 //go:embed cmd/lendctl/lendctl.c
 var LendctlSource []byte
-
-//go:embed sublime/lend.py
-var SublimePlugin []byte

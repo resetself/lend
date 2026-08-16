@@ -75,7 +75,7 @@ cd lend && make && make install
 On first login the remote fetches the `lendctl.c` source over the tunnel and compiles it with its local `gcc` (zero-install, no network). If `gcc` is unavailable, it falls back to downloading a precompiled `lendctl` from GitHub releases — publish one only if you want that fallback:
 
 ```bash
-git tag v0.1.0 && git push origin v0.1.0
+git tag v2.0.0 && git push origin v2.0.0
 ```
 
 ## Usage
@@ -118,13 +118,14 @@ code project/      # directory edits also sync on every save
 
 - **Every save** is pushed back to the remote file immediately (no need to wait or close anything).
 - **When you close the file/window**, the session ends and the local temp copy is removed.
-- The remote shell is never blocked; the sync runs in a detached background process.
+- **When you log out of the SSH session**, the session ends and the local temp copy is removed (the sync process is tied to your session).
+- The remote shell is never blocked; the sync runs in a background process.
 
-This is recognized for `subl`/`sublime`/`sublime_text`, `code`/`code-insiders`, `atom`, `gedit`, and `kate`. For other editors, pass their wait flag explicitly (e.g. `some-editor --wait file.txt`). Terminal editors such as `vim` need a TTY and are out of scope for a background daemon.
+This is recognized for `subl`/`sublime`/`sublime_text`, `code`/`code-insiders`, `atom`, `gedit`, and `kate`. Only invocations that open a file or directory become a live-sync session — a bare `subl`, `subl -h`, or `code --version` runs synchronously and its output is returned to the remote. For other editors, pass their wait flag explicitly (e.g. `some-editor --wait file.txt`). Terminal editors such as `vim` need a TTY and are out of scope for a background daemon.
 
 When you open a directory, the whole tree (including dotfiles, nested subdirectories, and symlinks) is materialized locally first, so the editor reads every file before you edit.
 
-> **Directory sessions in Sublime Text**: Sublime's `-w` flag only waits for *files*, so `subl -w dir/` alone would return immediately while the window stays open. To detect the window close cleanly, Lend installs a tiny window-watcher plugin into Sublime's `Packages/User` (`lend.py`); it reports the folders open across all windows, and Lend ends the directory session the moment that window is closed. **Restart Sublime once** after installing or updating Lend so the plugin loads — until then, Lend falls back to an empty `.lend-wait` tab that ties the session to the window (leave it alone). VS Code (`code -w dir/`) already blocks for folders and needs no plugin.
+**How a directory session ends** (editor-agnostic — no plugins, no extra tabs): Lend starts the editor with its wait flag. For files, and for editors whose wait flag also blocks for folders (e.g. `code -w dir/`), the process exiting is the close signal, so the session ends the moment the window closes. For editors whose wait flag returns immediately for a folder (e.g. Sublime Text's `subl -w dir/`), Lend detects this after a short grace period and keeps the temp copy alive, syncing every save, until **no save has happened for a while** (default 2 minutes; set `LEND_DIR_IDLE_TIMEOUT`, e.g. `5m`/`1h`, to change it). When a session ends, the temp copy is removed and the sync connection closes at the same moment; if the sync connection itself breaks (the remote side dies or the tunnel drops), the session also ends immediately.
 
 ## How arguments are classified
 
