@@ -35,10 +35,11 @@ var waitFlags = map[string][]string{
 	"kate":          {"--block"},
 }
 
-// dirBlockers lists editors whose wait flag ALSO blocks for a directory window
-// (so the editor process exiting is a reliable "closed" signal for a folder).
-// Editors not listed here (notably Sublime Text: `subl -w <dir>` returns
-// immediately while the window stays open) are kept alive via an idle timeout.
+// dirBlockers lists editors whose wait flag already blocks for a directory
+// window (so they need no sentinel file). Editors not listed here (notably
+// Sublime Text, where `subl -w <dir>` returns immediately) get an empty
+// .lend-wait sentinel opened alongside the folder so that closing the window
+// also unblocks the wait flag.
 var dirBlockers = map[string]bool{
 	"code":          true,
 	"code-insiders": true,
@@ -345,6 +346,27 @@ func runEdit(conn net.Conn, tool string, args []arg) {
 	if !ok {
 		return
 	}
+
+	hasDir := false
+	for i := range args {
+		if args[i].kind == "D" {
+			hasDir = true
+			break
+		}
+	}
+
+	// Some editors' wait flag only blocks for files, not a directory window
+	// (Sublime Text: `subl -w dir` returns immediately while the window stays
+	// open). To get a reliable "window closed" signal we open an empty sentinel
+	// file alongside the folder; when the window closes, the sentinel closes
+	// and the editor's -w unblocks. Editors whose wait flag already blocks for
+	// folders (code/code-insiders) don't need it.
+	if hasDir && !dirBlockers[filepath.Base(tool)] {
+		sentinel := filepath.Join(workdir, ".lend-wait")
+		if err := os.WriteFile(sentinel, nil, 0644); err == nil {
+			cmdArgs = append(cmdArgs, sentinel)
+		}
+	}
 	cmdArgs = append(cmdArgs, waitFlags[filepath.Base(tool)]...)
 
 	cmd := exec.Command(tool, cmdArgs...)
@@ -366,19 +388,6 @@ func runEdit(conn net.Conn, tool string, args []arg) {
 		return
 	}
 
-	hasDir := false
-	for i := range args {
-		if args[i].kind == "D" {
-			hasDir = true
-			break
-		}
-	}
-	// For a directory, the editor's exit is only a reliable "closed" signal if
-	// its wait flag blocks for folders (e.g. `code -w dir`). For others (e.g.
-	// `subl -w dir`) the CLI returns immediately while the window stays open,
-	// so we keep the session alive and sync every save until idle timeout.
-	relCloseSignal := !hasDir || dirBlockers[filepath.Base(tool)]
-
 	done := make(chan struct{})
 	go func() {
 		_ = cmd.Wait()
@@ -398,9 +407,8 @@ func runEdit(conn net.Conn, tool string, args []arg) {
 		}
 	}
 
-	// syncArgs pushes any changed F/D args and reports whether anything changed.
-	syncArgs := func() bool {
-		changed := false
+	// syncArgs pushes any changed F/D args back to the client.
+	syncArgs := func() {
 		for i := range args {
 			switch args[i].kind {
 			case "F":
@@ -410,7 +418,6 @@ func runEdit(conn net.Conn, tool string, args []arg) {
 				}
 				writeUpdate(bw, i, data)
 				lastF[i] = data
-				changed = true
 			case "D":
 				blob, err := writeTree(args[i].matPath)
 				if err != nil || bytes.Equal(blob, lastD[i]) {
@@ -418,17 +425,7 @@ func runEdit(conn net.Conn, tool string, args []arg) {
 				}
 				writeTreeFrame(bw, i, blob)
 				lastD[i] = blob
-				changed = true
 			}
-		}
-		return changed
-	}
-
-	lastChange := time.Now()
-	dirIdleTimeout := 15 * time.Minute
-	if v := os.Getenv("LEND_DIR_IDLE_TIMEOUT"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			dirIdleTimeout = d
 		}
 	}
 
@@ -438,26 +435,13 @@ func runEdit(conn net.Conn, tool string, args []arg) {
 	for {
 		select {
 		case <-done:
-			done = nil
-			if relCloseSignal {
-				// Editor closed: push any final unsynced change, then end.
-				syncArgs()
-				_, _ = bw.WriteString("SESSION_END\n")
-				_ = bw.Flush()
-				return
-			}
-			// Directory in a non-blocking editor: ignore the early exit and
-			// keep streaming saves until the idle timeout or a disconnect.
+			// Editor closed: push any final unsynced change, then end.
+			syncArgs()
+			_, _ = bw.WriteString("SESSION_END\n")
+			_ = bw.Flush()
+			return
 		case <-ticker.C:
-			if syncArgs() {
-				lastChange = time.Now()
-			}
-			if done == nil && !relCloseSignal && time.Since(lastChange) >= dirIdleTimeout {
-				syncArgs()
-				_, _ = bw.WriteString("SESSION_END\n")
-				_ = bw.Flush()
-				return
-			}
+			syncArgs()
 			if bw.Flush() != nil {
 				return // client disconnected
 			}
