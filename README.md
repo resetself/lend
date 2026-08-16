@@ -65,9 +65,9 @@ git clone https://github.com/resetself/lend.git
 cd lend && make && make install
 ```
 
-### 2. Create a release (for remote `lendctl`)
+### 2. (Optional) Create a release
 
-The remote side auto-downloads a precompiled `lendctl` binary from GitHub releases on first login, so publish one before using Lend with remote servers:
+On first login the remote fetches the `lendctl.c` source over the tunnel and compiles it with its local `gcc` (zero-install, no network). If `gcc` is unavailable, it falls back to downloading a precompiled `lendctl` from GitHub releases — publish one only if you want that fallback:
 
 ```bash
 git tag v0.1.0 && git push origin v0.1.0

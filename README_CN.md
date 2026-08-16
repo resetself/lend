@@ -65,9 +65,9 @@ git clone https://github.com/resetself/lend.git
 cd lend && make && make install
 ```
 
-### 2. 发布一个 release（供远程安装 `lendctl`）
+### 2. （可选）发布一个 release
 
-远程端首次登录时会从 GitHub releases 自动下载预编译的 `lendctl` 二进制，因此使用前请先发布一个版本：
+远程端首次登录时会通过隧道获取 `lendctl.c` 源码并用本地 `gcc` 编译（零安装、无需联网）。若远程没有 `gcc`，则回退到从 GitHub releases 下载预编译二进制——只有需要这个回退时才需要发布版本：
 
 ```bash
 git tag v0.1.0 && git push origin v0.1.0

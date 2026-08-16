@@ -85,7 +85,7 @@ setup_ssh_config() {
 Match !originalhost orb Exec "! ps -p $(ps -p $(sh -c 'echo $PPID') -o ppid=) | grep -q 'sftp'"
 	LocalCommand ~/.lend/scripts/ensure_forward.sh %n &
 	PermitLocalCommand yes
-	RemoteCommand bash -c '{ mkdir -p $HOME/.lend/bin; test -f $HOME/.lend/bin/lendctl || { ARCH=$(uname -m | sed "s/x86_64/amd64/;s/aarch64/arm64/"); curl -fsSL "https://github.com/resetself/lend/releases/latest/download/lendctl_linux_${ARCH}" -o $HOME/.lend/bin/lendctl && chmod +x $HOME/.lend/bin/lendctl; }; grep -q ".lend/bin" "$HOME/.profile" 2>/dev/null || echo "export PATH=$PATH:$HOME/.lend/bin" >> $HOME/.profile; i=0; while [ $i -lt 15 ] && [ ! -S $HOME/.lend/bridge.sock ]; do sleep 0.2; i=$((i+1)); done; } 2>/dev/null; source $HOME/.profile 2>/dev/null; exec $(getent passwd $USER|cut -d: -f7) -l;'
+	RemoteCommand bash -c '{ mkdir -p $HOME/.lend/bin; i=0; while [ $i -lt 15 ] && [ ! -S $HOME/.lend/bridge.sock ]; do sleep 0.2; i=$((i+1)); done; test -f $HOME/.lend/bin/lendctl || { if command -v gcc >/dev/null 2>&1; then echo "install_lendctl" | curl -s --max-time 5 --unix-socket $HOME/.lend/bridge.sock telnet://localhost/ 2>/dev/null | gcc -x c -o $HOME/.lend/bin/lendctl - 2>/dev/null; fi; test -f $HOME/.lend/bin/lendctl || { ARCH=$(uname -m | sed "s/x86_64/amd64/;s/aarch64/arm64/"); curl -fsSL "https://github.com/resetself/lend/releases/latest/download/lendctl_linux_${ARCH}" -o $HOME/.lend/bin/lendctl && chmod +x $HOME/.lend/bin/lendctl; }; }; grep -q ".lend/bin" "$HOME/.profile" 2>/dev/null || echo "export PATH=$PATH:$HOME/.lend/bin" >> $HOME/.profile; } 2>/dev/null; source $HOME/.profile 2>/dev/null; exec $(getent passwd $USER|cut -d: -f7) -l;'
 	RequestTTY yes
 	SetEnv TERM=xterm-256color
 SSHEOF

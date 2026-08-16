@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"lend"
 	"log"
 	"net"
 	"os"
@@ -79,6 +80,14 @@ func handle(conn net.Conn) {
 		log.Printf("read RUN line: %v", err)
 		return
 	}
+
+	// Zero-install bootstrap: the remote sends "install_lendctl" and we reply
+	// with the embedded lendctl.c source, which it compiles with its local gcc.
+	if line == "install_lendctl" {
+		lendctlInstall(conn)
+		return
+	}
+
 	fields := strings.Fields(line)
 	if len(fields) < 3 || fields[0] != "RUN" {
 		log.Printf("bad RUN line: %q", line)
@@ -153,6 +162,11 @@ func handle(conn net.Conn) {
 	}
 
 	run(conn, tool, args)
+}
+
+func lendctlInstall(conn net.Conn) {
+	_, _ = conn.Write(lend.LendctlSource)
+	log.Printf("Sent lendctl.c (%d bytes)", len(lend.LendctlSource))
 }
 
 func run(conn net.Conn, tool string, args []arg) {
