@@ -124,6 +124,8 @@ This is recognized for `subl`/`sublime`/`sublime_text`, `code`/`code-insiders`, 
 
 When you open a directory, the whole tree (including dotfiles, nested subdirectories, and symlinks) is materialized locally first, so the editor reads every file before you edit.
 
+> **Directory sessions**: Sublime Text's `-w` flag only waits for *files*, so `subl -w dir/` returns immediately while the window is still open. For a directory argument, Lend therefore does **not** treat the editor exiting as the close signal — it keeps the temp copy alive and keeps syncing every save, and only ends the session after **15 minutes of inactivity** (no save) or when the SSH connection drops. Editors whose wait flag also blocks for folders (VS Code `code -w dir/`) end immediately when the window is closed.
+
 ## How arguments are classified
 
 `lendctl` maps each argument to a type before sending it over the tunnel:
