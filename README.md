@@ -70,14 +70,6 @@ git clone https://github.com/resetself/lend.git
 cd lend && make && make install
 ```
 
-### 2. (Optional) Create a release
-
-On first login the remote fetches the `lendctl.c` source over the tunnel and compiles it with its local `gcc` (zero-install, no network). If `gcc` is unavailable, it falls back to downloading a precompiled `lendctl` from GitHub releases — publish one only if you want that fallback:
-
-```bash
-git tag v2.0.0 && git push origin v2.0.0
-```
-
 ## Usage
 
 ```bash
