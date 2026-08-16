@@ -108,12 +108,17 @@ Any local CLI tool works. Common examples:
 
 ### GUI editors
 
-GUI editors that fork and return immediately (such as `subl file.txt` or `code file.txt`) exit before you finish editing, so `lendd` would push back unchanged content. Use their wait flags so the process stays alive until the window closes:
+GUI editors that fork and return immediately (such as `subl` or `code`) would otherwise exit before you finish editing, so `lendd` would push back unchanged content and remove the temp files while the editor is still open. To avoid this, `lendd` automatically appends the editor's wait flag so the command stays alive until the window closes:
 
 ```bash
-subl -w file.txt
-code -w file.txt
+subl file.txt      # runs subl -w file.txt
+code file.txt      # runs code -w file.txt
+code project/      # runs code -w project/
 ```
+
+This is recognized for `subl`/`sublime`/`sublime_text`, `code`/`code-insiders`, `atom`, `gedit`, and `kate`. For other editors, pass their wait flag explicitly (e.g. `some-editor --wait file.txt`). Terminal editors such as `vim` need a TTY and are out of scope for a background daemon.
+
+When you open a directory, the whole tree (including dotfiles, nested subdirectories, and symlinks) is materialized locally first, so the editor reads every file before you edit.
 
 ## How arguments are classified
 

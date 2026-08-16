@@ -197,13 +197,19 @@ static int send_file(int fd, const char* path, const char* name) {
     if (fstat(f, &st) != 0 || st.st_size < 0) { close(f); return -1; }
     char* content = malloc((size_t)st.st_size + 1);
     if (!content) { close(f); return -1; }
-    ssize_t got = read(f, content, (size_t)st.st_size);
+    /* Read in a loop: a single read() may return fewer bytes than requested. */
+    size_t got = 0;
+    while (got < (size_t)st.st_size) {
+        ssize_t n = read(f, content + got, (size_t)st.st_size - got);
+        if (n <= 0) break;
+        got += (size_t)n;
+    }
     close(f);
-    if (got < 0) { free(content); return -1; }
+    if (got != (size_t)st.st_size) { free(content); return -1; }
 
     size_t name_len = strlen(name);
     char hdr[128];
-    int hl = snprintf(hdr, sizeof(hdr), "F %zu %zd\n", name_len, got);
+    int hl = snprintf(hdr, sizeof(hdr), "F %zu %zu\n", name_len, got);
     if (write_all(fd, hdr, (size_t)hl) < 0) { free(content); return -1; }
     if (write_all(fd, name, name_len) < 0) { free(content); return -1; }
     int rc = write_all(fd, content, (size_t)got);

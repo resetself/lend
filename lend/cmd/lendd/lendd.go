@@ -18,6 +18,22 @@ import (
 
 const maxBlobSize = 1 << 30 // 1GB guard against malformed length fields
 
+// waitFlags maps fork-and-return GUI editors to the flag that makes them block
+// until the edited file/window is closed. Without it, the editor exits
+// immediately, lendd pushes back unchanged content, and the temp workdir is
+// removed while the user is still editing (so edits never sync and a directory
+// opened in the editor can't read its files).
+var waitFlags = map[string][]string{
+	"subl":          {"-w"},
+	"sublime":       {"-w"},
+	"sublime_text":  {"-w"},
+	"code":          {"-w"},
+	"code-insiders": {"-w"},
+	"atom":          {"-w"},
+	"gedit":         {"-w"},
+	"kate":          {"--block"},
+}
+
 var (
 	baseDir    string
 	socketPath string
@@ -215,6 +231,13 @@ func run(conn net.Conn, tool string, args []arg) {
 			a.matPath = dst
 			cmdArgs = append(cmdArgs, dst)
 		}
+	}
+
+	// Fork-and-return GUI editors (subl, code, ...) exit immediately, so append
+	// their wait flag to block until the user closes the editor, keeping the
+	// workdir alive and pushing results back after the edit.
+	if flags, ok := waitFlags[filepath.Base(tool)]; ok {
+		cmdArgs = append(cmdArgs, flags...)
 	}
 
 	cmd := exec.Command(tool, cmdArgs...)

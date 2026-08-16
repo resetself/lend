@@ -108,12 +108,17 @@ prettier --write *.js
 
 ### GUI 编辑器
 
-像 `subl file.txt`、`code file.txt` 这类"启动后立即返回"的 GUI 编辑器，会在你编辑完成前就退出，导致 `lendd` 回传的还是未修改的内容。请使用它们的等待选项，让进程保持到窗口关闭：
+像 `subl`、`code` 这类"启动后立即返回"的 GUI 编辑器，会在你编辑完成前就退出，导致 `lendd` 回传的还是未修改的内容，并在编辑器仍打开时就把临时目录删掉。为避免这种情况，`lendd` 会自动追加编辑器的等待选项，让命令一直保持到窗口关闭：
 
 ```bash
-subl -w file.txt
-code -w file.txt
+subl file.txt      # 实际执行 subl -w file.txt
+code file.txt      # 实际执行 code -w file.txt
+code project/      # 实际执行 code -w project/
 ```
+
+已自动识别 `subl`/`sublime`/`sublime_text`、`code`/`code-insiders`、`atom`、`gedit` 和 `kate`。其它编辑器请手动传入等待选项（如 `some-editor --wait file.txt`）。`vim` 等终端编辑器需要 TTY，不适合后台守护进程模式。
+
+打开目录时，会先把整棵目录树（含隐藏文件、嵌套子目录和符号链接）物化到本地，因此编辑器能读到目录下所有文件。
 
 ## 参数分类规则
 
